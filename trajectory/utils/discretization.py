@@ -56,7 +56,7 @@ class QuantileDiscretizer:
 		# randint = np.random.randint(0, self.N, indices.shape)
 		# randint_2 = self.discretize(self.reconstruct(randint))
 		# assert (randint == randint_2).all()
-		print('✓')
+		print('done')
 
 	def discretize(self, x, subslice=(None, None)):
 		'''

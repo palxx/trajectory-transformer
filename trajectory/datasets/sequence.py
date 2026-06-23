@@ -6,7 +6,7 @@ import pdb
 from trajectory.utils import discretization
 from trajectory.utils.arrays import to_torch
 
-from .d4rl import load_environment, qlearning_dataset_with_timeouts
+from .d4rl import load_environment, get_dataset, qlearning_dataset_with_timeouts
 from .preprocessing import dataset_preprocess_functions
 
 def segment(observations, terminals, max_path_length):
@@ -33,7 +33,7 @@ def segment(observations, terminals, max_path_length):
 
     ## pad trajectories to be of equal length
     trajectories_pad = np.zeros((n_trajectories, max_path_length, observation_dim), dtype=trajectories[0].dtype)
-    early_termination = np.zeros((n_trajectories, max_path_length), dtype=np.bool)
+    early_termination = np.zeros((n_trajectories, max_path_length), dtype=bool)
     for i, traj in enumerate(trajectories):
         path_length = path_lengths[i]
         trajectories_pad[i,:path_length] = traj
@@ -52,8 +52,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.device = device
         
         print(f'[ datasets/sequence ] Loading...', end=' ', flush=True)
-        dataset = qlearning_dataset_with_timeouts(env.unwrapped, terminate_on_end=True)
-        print('✓')
+        dataset = get_dataset(env.name)
+        dataset = qlearning_dataset_with_timeouts(dataset, terminate_on_end=True)
+        print('done')
 
         preprocess_fn = dataset_preprocess_functions.get(env.name)
         if preprocess_fn:
@@ -84,7 +85,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         print(f'[ datasets/sequence ] Segmenting...', end=' ', flush=True)
         self.joined_segmented, self.termination_flags, self.path_lengths = segment(self.joined_raw, terminals, max_path_length)
         self.rewards_segmented, *_ = segment(self.rewards_raw, terminals, max_path_length)
-        print('✓')
+        print('done')
 
         self.discount = discount
         self.discounts = (discount ** np.arange(self.max_path_length))[:,None]
@@ -124,7 +125,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         ], axis=1)
         self.termination_flags = np.concatenate([
             self.termination_flags,
-            np.ones((n_trajectories, sequence_length-1), dtype=np.bool),
+            np.ones((n_trajectories, sequence_length-1), dtype=bool),
         ], axis=1)
 
     def __len__(self):

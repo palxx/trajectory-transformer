@@ -34,4 +34,4 @@ def to_img(x):
 def set_device(device):
 	DEVICE = device
 	if 'cuda' in device:
-		torch.set_default_tensor_type(torch.cuda.FloatTensor)
+		torch.set_default_device(device)

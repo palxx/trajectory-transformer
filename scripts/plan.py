@@ -51,7 +51,7 @@ preprocess_fn = datasets.get_preprocess_fn(env.name)
 ###### main loop ######
 #######################
 
-observation = env.reset()
+observation, _ = env.reset()
 total_reward = 0
 
 ## observations for rendering
@@ -87,7 +87,8 @@ for t in range(T):
     action = extract_actions(sequence_recon, observation_dim, action_dim, t=0)
 
     ## execute action in environment
-    next_observation, reward, terminal, _ = env.step(action)
+    next_observation, reward, terminated, truncated, _ = env.step(action)
+    terminal = terminated or truncated
 
     ## update return
     total_reward += reward

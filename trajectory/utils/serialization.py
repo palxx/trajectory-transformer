@@ -35,14 +35,14 @@ def load_model(*loadpath, epoch=None, device='cuda:0'):
     loadpath = os.path.join(*loadpath)
     config_path = os.path.join(loadpath, 'model_config.pkl')
 
-    if epoch is 'latest':
+    if epoch == 'latest':
         epoch = get_latest_epoch(loadpath)
 
     print(f'[ utils/serialization ] Loading model epoch: {epoch}')
     state_path = os.path.join(loadpath, f'state_{epoch}.pt')
 
     config = pickle.load(open(config_path, 'rb'))
-    state = torch.load(state_path)
+    state = torch.load(state_path, weights_only=True)
 
     model = config()
     model.to(device)

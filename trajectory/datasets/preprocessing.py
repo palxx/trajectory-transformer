@@ -10,7 +10,7 @@ def kitchen_preprocess_fn(observations):
 def ant_preprocess_fn(observations):
     qpos_dim = 13 ## root_x and root_y removed
     qvel_dim = 14
-    cfrc_dim = 84
+    cfrc_dim = 78 ## cfrc_ext for 13 bodies (gymnasium Ant-v5), excludes world body
     assert observations.shape[1] == qpos_dim + qvel_dim + cfrc_dim
     keep = observations[:, :qpos_dim + qvel_dim]
     return keep

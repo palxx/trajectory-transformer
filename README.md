@@ -6,7 +6,29 @@ Code release for [Offline Reinforcement Learning as One Big Sequence Modeling Pr
 
 ## Installation
 
-All python dependencies are in [`environment.yml`](environment.yml). Install with:
+This fork has been updated to run on current libraries (Python 3.10+, PyTorch 2.6,
+`gymnasium`/`mujoco`/`minari` in place of the unmaintained `gym==0.18`/`mujoco-py`/`d4rl`
+stack), which makes it possible to install and run on Windows as well as Linux.
+
+### venv (recommended, works on Windows and Linux)
+
+```
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # Linux/Mac
+
+pip install -r requirements.txt
+pip install -e .
+```
+
+The `torch`/`torchvision` versions in `requirements.txt` are pinned to the `cu124` CUDA
+build. If you have a different CUDA version (or no GPU), edit the
+`--extra-index-url`/version lines at the top of `requirements.txt` accordingly — see
+https://pytorch.org/get-started/locally/.
+
+### conda
+
+All python dependencies are also listed in [`environment.yml`](environment.yml). Install with:
 
 ```
 conda env create -f environment.yml
@@ -14,7 +36,41 @@ conda activate trajectory
 pip install -e .
 ```
 
-For reproducibility, we have also included system requirements in a [`Dockerfile`](azure/Dockerfile) (see [installation instructions](#Docker)), but the conda installation should work on most standard Linux machines.
+For reproducibility, we have also included system requirements in a [`Dockerfile`](azure/Dockerfile) (see [installation instructions](#Docker)), but the conda installation should work on most standard Linux machines. Note the Dockerfile still reflects the original `gym`/`mujoco-py`/`d4rl` stack and has not been updated as part of this migration.
+
+### Datasets and rendering: Minari instead of D4RL
+
+Datasets are now downloaded on-demand from [Minari](https://minari.farama.org/) (Farama's
+successor to D4RL) the first time `load_environment`/`get_dataset` is called for a given
+`--dataset`, and are cached under `~/.minari/datasets`. A few things to be aware of:
+
+- **`medium-replay` datasets are not available.** Minari's `mujoco/` namespace only
+  publishes `simple-v0` (random), `medium-v0`, and `expert-v0` for
+  `halfcheetah`/`hopper`/`walker2d`/`ant` — there is no `medium-replay` equivalent.
+  Requesting e.g. `hopper-medium-replay-v2` will raise a `NotImplementedError`.
+- **`medium-expert` datasets** are reconstructed by concatenating the `medium-v0` and
+  `expert-v0` Minari datasets, matching D4RL's own original 50/50 construction.
+- **Ant observations are now 105-dim** (13 qpos + 14 qvel + 78 `cfrc_ext`), matching
+  gymnasium's `Ant-v5` default observation layout. This differs from the original
+  111-dim `Ant-v2`/mujoco-py observation, and `ant_preprocess_fn` has been updated
+  accordingly.
+- On Windows, `HF_HUB_DISABLE_SYMLINKS=1` is set automatically (Hugging Face Hub
+  otherwise tries to create symlinks when caching datasets, which fails without
+  Developer Mode/admin rights).
+- `trajectory/utils/rendering.py` now uses the official `mujoco` Python bindings
+  (`mujoco.Renderer`/`mujoco.MjvCamera`) instead of `mujoco-py`. The `KitchenRenderer`,
+  `AntMazeRenderer`, and `Maze2dRenderer` classes relied on the old `gym==0.18`/`d4rl`/
+  `mujoco-py` stack for the kitchen/antmaze/maze2d task families and were **not**
+  migrated — they raise `NotImplementedError` if used. Only the locomotion
+  (`halfcheetah`/`hopper`/`walker2d`/`ant`) tasks and the default `Renderer` are
+  supported.
+
+### GPU training
+
+The training loop (`trajectory/utils/training.py`) uses `torch.autocast` with `bfloat16`
+on CUDA devices for faster mixed-precision training on Ampere/Ada/Hopper GPUs. No
+changes are needed to take advantage of this — it's enabled automatically whenever
+`device` starts with `'cuda'`.
 
 ## Usage
 

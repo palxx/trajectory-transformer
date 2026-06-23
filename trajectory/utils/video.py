@@ -1,27 +1,21 @@
 import os
 import numpy as np
-import skvideo.io
+import imageio
 
 def _make_dir(filename):
     folder = os.path.dirname(filename)
     if not os.path.exists(folder):
         os.makedirs(folder)
 
-def save_video(filename, video_frames, fps=60, video_format='mp4'):
+def save_video(filename, video_frames, fps=60):
     assert fps == int(fps), fps
     _make_dir(filename)
 
-    skvideo.io.vwrite(
-        filename,
-        video_frames,
-        inputdict={
-            '-r': str(int(fps)),
-        },
-        outputdict={
-            '-f': video_format,
-            '-pix_fmt': 'yuv420p', # '-pix_fmt=yuv420p' needed for osx https://github.com/scikit-video/scikit-video/issues/74
-        }
-    )
+    video_frames = np.asarray(video_frames)
+    if video_frames.dtype != np.uint8:
+        video_frames = video_frames.astype(np.uint8)
+
+    imageio.mimwrite(filename, video_frames, fps=int(fps))
 
 def save_videos(filename, *video_frames, **kwargs):
     ## video_frame : [ N x H x W x C ]

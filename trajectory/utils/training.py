@@ -45,7 +45,8 @@ class Trainer:
 
                 # forward the model
                 with torch.set_grad_enabled(True):
-                    logits, loss = model(*batch)
+                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled='cuda' in self.device):
+                        logits, loss = model(*batch)
                     losses.append(loss.item())
 
                 # backprop and update the parameters
