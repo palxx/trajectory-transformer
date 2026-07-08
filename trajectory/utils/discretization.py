@@ -150,6 +150,7 @@ class QuantileDiscretizer:
 		'''
 
 		if torch.is_tensor(probs):
+			device = probs.device
 			probs = to_np(probs)
 			return_torch = True
 		else:
@@ -162,8 +163,8 @@ class QuantileDiscretizer:
 		next_values = self.expectation(probs[:, 1], subslice=-1)
 
 		if return_torch:
-			rewards = to_torch(rewards)
-			next_values = to_torch(next_values)
+			rewards = to_torch(rewards, device=device)
+			next_values = to_torch(next_values, device=device)
 
 		return rewards, next_values
 
@@ -176,6 +177,7 @@ class QuantileDiscretizer:
 			percentile = float(percentile)
 
 		if torch.is_tensor(probs):
+			device = probs.device
 			probs = to_np(probs)
 			return_torch = True
 		else:
@@ -188,8 +190,8 @@ class QuantileDiscretizer:
 		next_values = self.percentile(probs[:, 1], percentile, subslice=-1)
 
 		if return_torch:
-			rewards = to_torch(rewards)
-			next_values = to_torch(next_values)
+			rewards = to_torch(rewards, device=device)
+			next_values = to_torch(next_values, device=device)
 
 		return rewards, next_values
 
