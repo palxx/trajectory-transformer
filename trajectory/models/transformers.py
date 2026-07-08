@@ -1,5 +1,4 @@
 import numpy as np
-import math
 import pdb
 
 import torch
@@ -25,9 +24,12 @@ class CausalSelfAttention(nn.Module):
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.register_buffer("mask", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
-        ## mask previous value estimates
-        joined_dim = config.observation_dim + config.action_dim + 2
+        ## mask previous value estimates (transition layout: rtg, obs, action, reward, value)
+        joined_dim = config.observation_dim + config.action_dim + 3
         self.mask.squeeze()[:,joined_dim-1::joined_dim] = 0
+        ## boolean keep-mask for scaled_dot_product_attention (True = attend)
+        self.attn_pdrop = config.attn_pdrop
+        self.register_buffer("keep_mask", self.mask.bool())
         ##
         self.n_head = config.n_head
 
@@ -40,15 +42,13 @@ class CausalSelfAttention(nn.Module):
         q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        ## [ B x n_heads x T x T ]
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        self._attn_map = att.clone()
-        att = self.attn_drop(att)
+        # fused causal self-attention (flash / memory-efficient kernel)
         ## [ B x n_heads x T x head_size ]
-        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=self.keep_mask[:,:,:T,:T],
+            dropout_p=self.attn_pdrop if self.training else 0.0,
+        )
         ## [ B x T x embedding_dim ]
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
@@ -100,6 +100,7 @@ class GPT(nn.Module):
 
         self.action_dim = config.action_dim
         self.transition_dim = config.transition_dim
+        self.rtg_weight = config.rtg_weight
         self.action_weight = config.action_weight
         self.reward_weight = config.reward_weight
         self.value_weight = config.value_weight
@@ -232,10 +233,11 @@ class GPT(nn.Module):
         # if we are given some desired targets also calculate the loss
         if targets is not None:
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.view(-1), reduction='none')
-            if self.action_weight != 1 or self.reward_weight != 1 or self.value_weight != 1:
+            if self.rtg_weight != 1 or self.action_weight != 1 or self.reward_weight != 1 or self.value_weight != 1:
                 #### make weights
                 n_states = int(np.ceil(t / self.transition_dim))
                 weights = torch.cat([
+                    torch.ones(1, device=idx.device) * self.rtg_weight,
                     torch.ones(self.observation_dim, device=idx.device),
                     torch.ones(self.action_dim, device=idx.device) * self.action_weight,
                     torch.ones(1, device=idx.device) * self.reward_weight,
@@ -305,10 +307,11 @@ class ConditionalGPT(GPT):
         # if we are given some desired targets also calculate the loss
         if targets is not None:
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.view(-1), reduction='none')
-            if self.action_weight != 1 or self.reward_weight != 1 or self.value_weight != 1:
+            if self.rtg_weight != 1 or self.action_weight != 1 or self.reward_weight != 1 or self.value_weight != 1:
                 #### make weights
                 n_states = int(np.ceil(t / self.transition_dim))
                 weights = torch.cat([
+                    torch.ones(1, device=idx.device) * self.rtg_weight,
                     torch.ones(self.observation_dim, device=idx.device),
                     torch.ones(self.action_dim, device=idx.device) * self.action_weight,
                     torch.ones(1, device=idx.device) * self.reward_weight,

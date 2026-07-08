@@ -3,9 +3,10 @@ import torch
 import pdb
 
 from .. import utils
+from ..utils.arrays import to_np, to_torch
 from .sampling import sample_n, get_logp, sort_2d
 
-REWARD_DIM = VALUE_DIM = 1
+RTG_DIM = REWARD_DIM = VALUE_DIM = 1
 
 @torch.no_grad()
 def beam_plan(
@@ -16,15 +17,19 @@ def beam_plan(
     k_obs=None, k_act=None, k_rew=1,
     cdf_obs=None, cdf_act=None, cdf_rew=None,
     verbose=True, previous_actions=None,
+    discretizer=None, rtg=None,
 ):
     '''
         x : tensor[ 1 x input_sequence_length ]
+        discretizer : QuantileDiscretizer, used to tokenize the analytically-updated
+            return-to-go at each step (it is computed, not sampled from the model)
+        rtg : float, return-to-go conditioning the transition `x` already ends on
     '''
 
     inp = x.clone()
 
     # convert max number of transitions to max number of tokens
-    transition_dim = observation_dim + action_dim + REWARD_DIM + VALUE_DIM
+    transition_dim = RTG_DIM + observation_dim + action_dim + REWARD_DIM + VALUE_DIM
     max_block = max_context_transitions * transition_dim - 1 if max_context_transitions else None
 
     ## pass in max numer of tokens to sample function
@@ -40,6 +45,10 @@ def beam_plan(
     rewards = torch.zeros(beam_width, n_steps + 1, device=x.device)
     discounts = discount ** torch.arange(n_steps + 1, device=x.device)
 
+    ## running return-to-go per beam candidate; decremented by realized reward
+    ## each step (Decision-Transformer-style conditioning, not predicted by the model)
+    rtg = torch.full((beam_width,), float(rtg), device=x.device)
+
     ## logging
     progress = utils.Progress(n_steps) if verbose else utils.Silent()
 
@@ -47,6 +56,7 @@ def beam_plan(
         ## repeat everything by `n_expand` before we sample actions
         x = x.repeat(n_expand, 1)
         rewards = rewards.repeat(n_expand, 1)
+        rtg = rtg.repeat(n_expand)
 
         ## sample actions
         x, _ = sample_n(model, x, action_dim, topk=k_act, cdf=cdf_act, **sample_kwargs)
@@ -72,8 +82,17 @@ def beam_plan(
         x = x[inds]
         rewards = rewards[inds]
 
+        ## return-to-go for the *next* transition: what's left after this step's reward
+        rtg = rtg[inds] - r_t[inds]
+
         ## sample next observation (unless we have reached the end of the planning horizon)
         if t < n_steps - 1:
+            ## insert the next transition's rtg token analytically (computed above,
+            ## not sampled), then sample the observation that follows it
+            rtg_token = discretizer.discretize(to_np(rtg)[:, None], subslice=[0, 1])
+            rtg_token = to_torch(rtg_token, dtype=torch.long, device=x.device)
+            x = torch.cat([x, rtg_token], dim=1)
+
             x, _ = sample_n(model, x, observation_dim, topk=k_obs, cdf=cdf_obs, **sample_kwargs)
 
         ## logging

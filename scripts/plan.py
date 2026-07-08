@@ -1,9 +1,11 @@
 import json
 import pdb
+from datetime import datetime
 from os.path import join
 
 import trajectory.utils as utils
 import trajectory.datasets as datasets
+from trajectory.datasets.d4rl import REF_MAX_SCORE, parse_dataset_name
 from trajectory.search import (
     beam_plan,
     make_prefix,
@@ -47,12 +49,22 @@ action_dim = dataset.action_dim
 value_fn = lambda x: discretizer.value_fn(x, args.percentile)
 preprocess_fn = datasets.get_preprocess_fn(env.name)
 
+## desired return-to-go conditioning the rollout, Decision-Transformer-style;
+## defaults to the task's expert-level reference return when not specified
+if args.target_return is None:
+    env_name, *_ = parse_dataset_name(args.dataset)
+    args.target_return = REF_MAX_SCORE[env_name]
+print(f'[ plan ] target_return: {args.target_return:.2f}', flush=True)
+
 #######################
 ###### main loop ######
 #######################
 
 observation, _ = env.reset()
 total_reward = 0
+
+## return-to-go remaining, decremented by actual reward as the rollout progresses
+rtg = args.target_return
 
 ## observations for rendering
 rollout = [observation.copy()]
@@ -67,7 +79,7 @@ for t in range(T):
 
     if t % args.plan_freq == 0:
         ## concatenate previous transitions and current observations to input to model
-        prefix = make_prefix(discretizer, context, observation, args.prefix_context)
+        prefix = make_prefix(discretizer, context, observation, rtg, args.prefix_context, device=args.device)
 
         ## sample sequence from model beginning with `prefix`
         sequence = beam_plan(
@@ -75,6 +87,7 @@ for t in range(T):
             args.horizon, args.beam_width, args.n_expand, observation_dim, action_dim,
             discount, args.max_context_transitions, verbose=args.verbose,
             k_obs=args.k_obs, k_act=args.k_act, cdf_obs=args.cdf_obs, cdf_act=args.cdf_act,
+            discretizer=discretizer, rtg=rtg,
         )
 
     else:
@@ -96,11 +109,15 @@ for t in range(T):
 
     ## update rollout observations and context transitions
     rollout.append(next_observation.copy())
-    context = update_context(context, discretizer, observation, action, reward, args.max_context_transitions)
+    context = update_context(context, discretizer, observation, action, reward, rtg, args.max_context_transitions, device=args.device)
+
+    ## return-to-go remaining, for next step's conditioning
+    rtg = rtg - reward
 
     print(
-        f'[ plan ] t: {t} / {T} | r: {reward:.2f} | R: {total_reward:.2f} | score: {score:.4f} | '
-        f'time: {timer():.2f} | {args.dataset} | {args.exp_name} | {args.suffix}\n'
+        f'[ plan ] t: {t} / {T} | r: {reward:.2f} | R: {total_reward:.2f} | rtg: {rtg:.2f} | score: {score:.4f} | '
+        f'time: {timer():.2f} | {args.dataset} | {args.exp_name} | {args.suffix}\n',
+        flush=True,
     )
 
     ## visualization
@@ -118,5 +135,18 @@ for t in range(T):
 
 ## save result as a json file
 json_path = join(args.savepath, 'rollout.json')
-json_data = {'score': score, 'step': t, 'return': total_reward, 'term': terminal, 'gpt_epoch': gpt_epoch}
+json_data = {'score': score, 'step': t, 'return': total_reward, 'term': terminal, 'gpt_epoch': gpt_epoch,
+             'target_return': args.target_return}
 json.dump(json_data, open(json_path, 'w'), indent=2, sort_keys=True)
+
+## log this episode alongside every other plan.py run on this dataset, and
+## (re)plot the cross-run comparison so progress is visible as runs complete
+eval_result = {
+    'time': datetime.now().isoformat(timespec='seconds'),
+    'exp_name': args.exp_name,
+    'suffix': args.suffix,
+    'gpt_loadpath': args.gpt_loadpath,
+    **json_data,
+}
+utils.log_evaluation_result(args.logbase, args.dataset, eval_result)
+utils.plot_evaluation_scores(args.logbase, args.dataset)

@@ -29,7 +29,7 @@ base = {
         'device': 'cuda',
 
         'n_embd': 32,
-        'batch_size': 256,
+        'batch_size': 512,
         'learning_rate': 6e-4,
         'lr_decay': True,
         'seed': 42,
@@ -44,6 +44,7 @@ base = {
         'exp_name': gpt_expname,
 
         'discretizer': 'QuantileDiscretizer',
+        'rtg_weight': 1,
         'action_weight': 5,
         'reward_weight': 1,
         'value_weight': 1,
@@ -69,6 +70,11 @@ base = {
 
         'max_context_transitions': 5,
         'prefix_context': True,
+
+        ## desired return-to-go to condition planning on, Decision-Transformer-style;
+        ## defaults to the task's expert-level reference return (see REF_MAX_SCORE in
+        ## trajectory/datasets/d4rl.py) when left as None
+        'target_return': None,
 
         'vis_freq': 50,
         'exp_name': watch(args_to_watch),
@@ -135,7 +141,7 @@ walker2d_medium_replay_v2 = {
 ant_medium_v2 = ant_medium_replay_v2 = ant_random_v2 = {
     'train': {
         ## reduce batch size because the dimensionality is larger
-        'batch_size': 128,
+        'batch_size': 256,
     },
     'plan': {
         'horizon': 5,

@@ -7,6 +7,10 @@ import trajectory.utils as utils
 import trajectory.datasets as datasets
 from trajectory.models.transformers import GPT
 
+## allow TF32 matmuls/convs on Ampere+ GPUs (RTX 6000 Ada) for faster fp32 ops
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 
 class Parser(utils.Parser):
     dataset: str = 'halfcheetah-medium-expert-v2'
@@ -64,6 +68,7 @@ model_config = utils.Config(
     ## dimensions
     observation_dim=obs_dim, action_dim=act_dim, transition_dim=transition_dim,
     ## loss weighting
+    rtg_weight=args.rtg_weight,
     action_weight=args.action_weight, reward_weight=args.reward_weight, value_weight=args.value_weight,
     ## dropout probabilities
     embd_pdrop=args.embd_pdrop, resid_pdrop=args.resid_pdrop, attn_pdrop=args.attn_pdrop,
@@ -108,14 +113,18 @@ n_epochs = int(1e6 / len(dataset) * args.n_epochs_ref)
 save_freq = max(int(n_epochs // args.n_saves), 1)
 
 for epoch in range(n_epochs):
-    print(f'\nEpoch: {epoch} / {n_epochs} | {args.dataset} | {args.exp_name}')
+    print(f'\nEpoch: {epoch} / {n_epochs} | {args.dataset} | {args.exp_name}', flush=True)
 
-    trainer.train(model, dataset)
+    epoch_loss = trainer.train(model, dataset)
+
+    ## log + (re)plot the training curve, so progress is visible while training runs
+    utils.log_training_loss(args.savepath, epoch, epoch_loss)
+    utils.plot_training_curve(args.savepath)
 
     ## get greatest multiple of `save_freq` less than or equal to `save_epoch`
     save_epoch = (epoch + 1) // save_freq * save_freq
     statepath = os.path.join(args.savepath, f'state_{save_epoch}.pt')
-    print(f'Saving model to {statepath}')
+    print(f'Saving model to {statepath}', flush=True)
 
     ## save state to disk
     state = model.state_dict()

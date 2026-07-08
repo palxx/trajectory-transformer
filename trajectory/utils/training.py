@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 from torch.utils.data.dataloader import DataLoader
 import pdb
@@ -35,6 +36,7 @@ class Trainer:
                             batch_size=config.batch_size,
                             num_workers=config.num_workers)
 
+        epoch_loss = None
         for _ in range(n_epochs):
 
             losses = []
@@ -77,6 +79,9 @@ class Trainer:
                     print(
                         f'[ utils/training ] epoch {self.n_epochs} [ {it:4d} / {len(loader):4d} ] ',
                         f'train loss {loss.item():.5f} | lr {lr:.3e} | lr_mult: {lr_mult:.4f} | '
-                        f't: {timer():.2f}')
+                        f't: {timer():.2f}', flush=True)
 
             self.n_epochs += 1
+            epoch_loss = float(np.mean(losses))
+
+        return epoch_loss

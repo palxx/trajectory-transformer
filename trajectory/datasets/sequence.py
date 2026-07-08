@@ -98,12 +98,19 @@ class SequenceDataset(torch.utils.data.Dataset):
             V = (self.rewards_segmented[:,t+1:] * self.discounts[:-t-1]).sum(axis=1)
             self.values_segmented[:,t] = V
 
-        ## add (r, V) to `joined`
+        ## return-to-go (undiscounted, Decision-Transformer-style): sum of rewards
+        ## from `t` (inclusive) to the end of the trajectory
+        self.rtg_segmented = np.cumsum(self.rewards_segmented[:,::-1], axis=1)[:,::-1]
+
+        ## add (RTG, r, V) to `joined`; RTG goes first so each transition reads
+        ## (rtg, obs, action, reward, value), matching the Decision Transformer order
         values_raw = self.values_segmented.squeeze(axis=-1).reshape(-1)
         values_mask = ~self.termination_flags.reshape(-1)
         self.values_raw = values_raw[values_mask, None]
-        self.joined_raw = np.concatenate([self.joined_raw, self.rewards_raw, self.values_raw], axis=-1)
-        self.joined_segmented = np.concatenate([self.joined_segmented, self.rewards_segmented, self.values_segmented], axis=-1)
+        rtg_raw = self.rtg_segmented.squeeze(axis=-1).reshape(-1)
+        self.rtg_raw = rtg_raw[values_mask, None]
+        self.joined_raw = np.concatenate([self.rtg_raw, self.joined_raw, self.rewards_raw, self.values_raw], axis=-1)
+        self.joined_segmented = np.concatenate([self.rtg_segmented, self.joined_segmented, self.rewards_segmented, self.values_segmented], axis=-1)
 
         ## get valid indices
         indices = []
