@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import numpy as np
 import torch
 import pdb
@@ -15,6 +16,9 @@ torch.backends.cudnn.allow_tf32 = True
 class Parser(utils.Parser):
     dataset: str = 'halfcheetah-medium-expert-v2'
     config: str = 'config.offline'
+    ## path to a .npz saved by scripts/generate.py; when set, those self-generated
+    ## rollout transitions are mixed into the offline dataset before training
+    generated_data_path: Optional[str] = None
 
 #######################
 ######## setup ########
@@ -40,6 +44,7 @@ dataset_config = utils.Config(
     step=args.step,
     discount=args.discount,
     discretizer=args.discretizer,
+    generated_data_path=args.generated_data_path,
 )
 
 dataset = dataset_config()
@@ -72,10 +77,43 @@ model_config = utils.Config(
     action_weight=args.action_weight, reward_weight=args.reward_weight, value_weight=args.value_weight,
     ## dropout probabilities
     embd_pdrop=args.embd_pdrop, resid_pdrop=args.resid_pdrop, attn_pdrop=args.attn_pdrop,
+    ## recompute activations during backward instead of storing them, to trade
+    ## compute time for GPU memory (helps most when the model doesn't fit otherwise)
+    grad_checkpoint=True,
 )
 
 model = model_config()
-model.to(args.device)
+
+## NCCL (needed for torch.distributed / FSDP) isn't available for native Windows
+## processes, so with >1 GPU we fall back to manual pipeline-parallelism: split the
+## transformer blocks across the visible GPUs within this single process instead of
+## sharding via a distributed backend. Slower than data parallel, but doesn't require
+## the whole model to fit on one card.
+##
+## Splitting only helps when the model doesn't comfortably fit on one GPU - for small
+## models it's pure overhead (pipeline bubble + cross-device transfer, zero memory
+## benefit), so only do it if a rough bf16 weights+grad estimate would eat more than
+## 70% of a single card.
+n_params = sum(p.numel() for p in model.parameters())
+bf16_train_bytes = n_params * 4  # ~2 bytes bf16 weights + ~2 bytes bf16 grads
+n_gpus = torch.cuda.device_count()
+single_gpu_capacity = torch.cuda.get_device_properties(0).total_memory * 0.7 if torch.cuda.is_available() else 0
+needs_split = bf16_train_bytes > single_gpu_capacity
+print(f'[ train ] Model has {n_params/1e6:.1f}M params (~{bf16_train_bytes/1e9:.2f}GB bf16 weights+grads)')
+
+if n_gpus > 1 and 'cuda' in args.device and needs_split:
+    devices = [f'cuda:{i}' for i in range(n_gpus)]
+    print(f'[ train ] {n_gpus} GPUs visible; splitting model across {devices}')
+    model.distribute(devices)
+    train_device = devices[0]
+    ## split each batch into microbatches and pipeline them across the GPU split
+    ## (see Trainer.train) so GPU0 isn't idle while GPU1 finishes the previous
+    ## microbatch, instead of sending the whole batch through as one lockstep unit.
+    num_microbatches = min(4, args.batch_size)
+else:
+    model.to(args.device)
+    train_device = args.device
+    num_microbatches = 1
 
 #######################
 ####### trainer #######
@@ -99,7 +137,8 @@ trainer_config = utils.Config(
     final_tokens=final_tokens,
     ## dataloader
     num_workers=0,
-    device=args.device,
+    device=train_device,
+    num_microbatches=num_microbatches,
 )
 
 trainer = trainer_config()

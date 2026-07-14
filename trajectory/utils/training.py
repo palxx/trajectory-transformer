@@ -31,6 +31,7 @@ class Trainer:
         optimizer = self.get_optimizer(model)
         model.train(True)
         vocab_size = dataset.N
+        num_microbatches = max(1, getattr(config, 'num_microbatches', 1))
 
         loader = DataLoader(dataset, shuffle=True, pin_memory=True,
                             batch_size=config.batch_size,
@@ -43,23 +44,49 @@ class Trainer:
             timer = Timer()
             for it, batch in enumerate(loader):
 
-                batch = to(batch, self.device)
+                idx, targets, mask = to(batch, self.device)
+                model.zero_grad()
 
-                # forward the model
-                with torch.set_grad_enabled(True):
-                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled='cuda' in self.device):
-                        logits, loss = model(*batch)
-                    losses.append(loss.item())
+                if num_microbatches > 1:
+                    idx_chunks = idx.chunk(num_microbatches, dim=0)
+                    target_chunks = targets.chunk(num_microbatches, dim=0)
+                    mask_chunks = mask.chunk(num_microbatches, dim=0)
+                    n_chunks = len(idx_chunks)
+
+                    ## Pipeline-parallel overlap: dispatch every microbatch's forward pass
+                    ## before dispatching any backward. A CUDA stream executes a device's
+                    ## queued kernels strictly in enqueue order, so if forward+backward were
+                    ## interleaved per microbatch, GPU0 would stall on microbatch k's
+                    ## backward (which waits on GPU1) before it could start microbatch k+1's
+                    ## forward - killing overlap. Queuing all forwards first means GPU0's
+                    ## forward-only kernels for k+1..n have no such dependency and run back
+                    ## to back, while GPU1 works through earlier microbatches concurrently;
+                    ## the same reasoning applies in reverse once all backwards are queued.
+                    micro_losses = []
+                    for mi, mt, mm in zip(idx_chunks, target_chunks, mask_chunks):
+                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled='cuda' in self.device):
+                            _, loss_mb = model(mi, mt, mm)
+                        micro_losses.append(loss_mb / n_chunks)
+
+                    for loss_mb in micro_losses:
+                        loss_mb.backward()
+
+                    loss = sum(l.detach() for l in micro_losses)
+                else:
+                    with torch.set_grad_enabled(True):
+                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled='cuda' in self.device):
+                            logits, loss = model(idx, targets, mask)
+                    loss.backward()
+
+                losses.append(loss.item())
 
                 # backprop and update the parameters
-                model.zero_grad()
-                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm_clip)
                 optimizer.step()
 
                 # decay the learning rate based on our progress
                 if config.lr_decay:
-                    y = batch[-2]
+                    y = targets
                     self.n_tokens += (y != vocab_size).sum() # number of tokens processed this step
                     if self.n_tokens < config.warmup_tokens:
                         # linear warmup

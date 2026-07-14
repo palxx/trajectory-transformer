@@ -118,19 +118,19 @@ def _concat_datasets(datasets):
     keys = datasets[0].keys()
     return {key: np.concatenate([d[key] for d in datasets], axis=0) for key in keys}
 
-def get_dataset(name):
+def get_dataset(name, generated_data_path=None):
     env_name, quality, version = parse_dataset_name(name)
 
     if quality == 'medium-expert':
         ## D4RL constructs `medium-expert` by mixing the `medium` and `expert` datasets
         medium = _flatten_minari_dataset(f'mujoco/{env_name}/medium-v0')
         expert = _flatten_minari_dataset(f'mujoco/{env_name}/expert-v0')
-        return _concat_datasets([medium, expert])
+        dataset = _concat_datasets([medium, expert])
 
-    if quality == 'medium-replay':
+    elif quality == 'medium-replay':
         minari_id = f'D4RL/{env_name}/medium-replay-v0'
         try:
-            return _flatten_minari_dataset(minari_id)
+            dataset = _flatten_minari_dataset(minari_id)
         except Exception as e:
             raise NotImplementedError(
                 f"[ datasets/d4rl ] Could not load '{minari_id}' from Minari ({e}). "
@@ -138,11 +138,21 @@ def get_dataset(name):
                 f"environments in Minari; see README for details."
             )
 
-    if quality not in MINARI_QUALITY_IDS:
-        raise ValueError(f'[ datasets/d4rl ] Unrecognized dataset quality: {quality}')
+    else:
+        if quality not in MINARI_QUALITY_IDS:
+            raise ValueError(f'[ datasets/d4rl ] Unrecognized dataset quality: {quality}')
+        minari_id = f'mujoco/{env_name}/{MINARI_QUALITY_IDS[quality]}'
+        dataset = _flatten_minari_dataset(minari_id)
 
-    minari_id = f'mujoco/{env_name}/{MINARI_QUALITY_IDS[quality]}'
-    return _flatten_minari_dataset(minari_id)
+    if generated_data_path is not None:
+        ## mix in self-generated (model rollout) transitions saved by scripts/generate.py,
+        ## in the same flat {observations, actions, rewards, terminals, timeouts} format
+        generated = dict(np.load(generated_data_path))
+        print(f'[ datasets/d4rl ] Mixing in {len(generated["rewards"])} self-generated '
+              f'transitions from {generated_data_path}')
+        dataset = _concat_datasets([dataset, generated])
+
+    return dataset
 
 def qlearning_dataset_with_timeouts(dataset, terminate_on_end=False, **kwargs):
     N = dataset['rewards'].shape[0]

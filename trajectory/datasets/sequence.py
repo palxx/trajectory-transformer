@@ -43,16 +43,16 @@ def segment(observations, terminals, max_path_length):
 
 class SequenceDataset(torch.utils.data.Dataset):
 
-    def __init__(self, env, sequence_length=250, step=10, discount=0.99, max_path_length=1000, penalty=None, device='cuda:0'):
+    def __init__(self, env, sequence_length=250, step=10, discount=0.99, max_path_length=1000, penalty=None, device='cuda:0', generated_data_path=None):
         print(f'[ datasets/sequence ] Sequence length: {sequence_length} | Step: {step} | Max path length: {max_path_length}')
         self.env = env = load_environment(env) if type(env) is str else env
         self.sequence_length = sequence_length
         self.step = step
         self.max_path_length = max_path_length
         self.device = device
-        
+
         print(f'[ datasets/sequence ] Loading...', end=' ', flush=True)
-        dataset = get_dataset(env.name)
+        dataset = get_dataset(env.name, generated_data_path=generated_data_path)
         dataset = qlearning_dataset_with_timeouts(dataset, terminate_on_end=True)
         print('done')
 

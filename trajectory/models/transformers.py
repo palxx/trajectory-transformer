@@ -4,6 +4,7 @@ import pdb
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .ein import EinLinear
 
@@ -108,6 +109,42 @@ class GPT(nn.Module):
         self.embedding_dim = config.n_embd
         self.apply(self._init_weights)
 
+        ## set by distribute() for multi-GPU pipeline-parallel training;
+        ## None means "everything lives on whatever single device .to() put it on"
+        self.block_devices = None
+        self.use_checkpoint = getattr(config, 'grad_checkpoint', False)
+
+    def distribute(self, devices):
+        """
+        Splits self.blocks evenly across `devices` (a list of device strings/torch.devices)
+        and pins the input embeddings to devices[0] / output head to devices[-1].
+
+        This is plain model parallelism within a single process (each transformer block
+        runs on one GPU, activations are handed off across the device boundary) rather than
+        NCCL-based sharding (FSDP/DDP), because NCCL is not available for native Windows
+        processes. It trades throughput (no overlap between GPUs) for the ability to fit a
+        model whose parameters don't fit on a single GPU.
+
+        Parameters are also cast to bf16 here (not just autocast'd during forward): autocast
+        only casts activations, leaving fp32 weights + fp32 grads resident, which is roughly
+        2x the memory a plain bf16 model needs and was enough by itself to blow past 48GB
+        per GPU on a ~13B-parameter model.
+        """
+        self.devices = [torch.device(d) for d in devices]
+        n_blocks = len(self.blocks)
+        n_dev = len(self.devices)
+        self.block_devices = [self.devices[i * n_dev // n_blocks] for i in range(n_blocks)]
+
+        self.tok_emb.to(self.devices[0])
+        self.pos_emb.data = self.pos_emb.data.to(self.devices[0])
+        self.drop.to(self.devices[0])
+        for block, device in zip(self.blocks, self.block_devices):
+            block.to(device)
+        self.ln_f.to(self.devices[-1])
+        self.head.to(self.devices[-1])
+        self.to(dtype=torch.bfloat16)
+        return self
+
     def get_block_size(self):
         return self.block_size
 
@@ -158,12 +195,25 @@ class GPT(nn.Module):
         assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
                                                     % (str(param_dict.keys() - union_params), )
 
-        # create the pytorch optimizer object
+        # create the optimizer object
         optim_groups = [
             {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": train_config.weight_decay},
             {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
         ]
-        optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
+
+        ## prefer bitsandbytes' paged 8-bit AdamW: momentum/variance are stored in 1 byte
+        ## each instead of 4 (torch.optim.AdamW), and "paged" means CUDA transparently
+        ## spills optimizer state to pinned host RAM under GPU memory pressure instead of
+        ## OOMing. This is what makes a multi-billion parameter model's optimizer state
+        ## feasible on 48GB cards without hand-rolled CPU offloading.
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.PagedAdamW8bit(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
+            print('[ models/transformers ] Using bitsandbytes PagedAdamW8bit (8-bit, CPU-paged optimizer state)')
+        except ImportError:
+            optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
+            print('[ models/transformers ] bitsandbytes not installed; falling back to torch.optim.AdamW '
+                  '(4x more optimizer memory, no CPU paging) - `pip install bitsandbytes` to enable it')
         return optimizer
 
     def offset_tokens(self, idx):
@@ -178,7 +228,7 @@ class GPT(nn.Module):
     def pad_to_full_observation(self, x, verify=False):
         b, t, _ = x.shape
         n_pad = (self.transition_dim - t % self.transition_dim) % self.transition_dim
-        padding = torch.zeros(b, n_pad, self.embedding_dim, device=x.device)
+        padding = torch.zeros(b, n_pad, self.embedding_dim, device=x.device, dtype=x.dtype)
         ## [ B x T' x embedding_dim ]
         x_pad = torch.cat([x, padding], dim=1)
         ## [ (B * T' / transition_dim) x transition_dim x embedding_dim ]
@@ -209,6 +259,9 @@ class GPT(nn.Module):
         b, t = idx.size()
         assert t <= self.block_size, "Cannot forward, model block size is exhausted."
 
+        if self.block_devices is not None:
+            idx = idx.to(self.devices[0])
+
         offset_idx = self.offset_tokens(idx)
         ## [ B x T x embedding_dim ]
         # forward the GPT model
@@ -217,7 +270,20 @@ class GPT(nn.Module):
         position_embeddings = self.pos_emb[:, :t, :] # each position maps to a (learnable) vector
         ## [ B x T x embedding_dim ]
         x = self.drop(token_embeddings + position_embeddings)
-        x = self.blocks(x)
+
+        if self.block_devices is None:
+            x = self.blocks(x)
+        else:
+            ## pipeline-parallel forward: hand activations across the GPU boundary
+            ## wherever a block lives on a different device than the previous one
+            for block, device in zip(self.blocks, self.block_devices):
+                if x.device != device:
+                    x = x.to(device)
+                if self.use_checkpoint and self.training:
+                    x = checkpoint(block, x, use_reentrant=False)
+                else:
+                    x = block(x)
+
         ## [ B x T x embedding_dim ]
         x = self.ln_f(x)
 
@@ -232,16 +298,18 @@ class GPT(nn.Module):
 
         # if we are given some desired targets also calculate the loss
         if targets is not None:
+            targets = targets.to(logits.device)
+            mask = mask.to(logits.device)
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.view(-1), reduction='none')
             if self.rtg_weight != 1 or self.action_weight != 1 or self.reward_weight != 1 or self.value_weight != 1:
                 #### make weights
                 n_states = int(np.ceil(t / self.transition_dim))
                 weights = torch.cat([
-                    torch.ones(1, device=idx.device) * self.rtg_weight,
-                    torch.ones(self.observation_dim, device=idx.device),
-                    torch.ones(self.action_dim, device=idx.device) * self.action_weight,
-                    torch.ones(1, device=idx.device) * self.reward_weight,
-                    torch.ones(1, device=idx.device) * self.value_weight,
+                    torch.ones(1, device=logits.device) * self.rtg_weight,
+                    torch.ones(self.observation_dim, device=logits.device),
+                    torch.ones(self.action_dim, device=logits.device) * self.action_weight,
+                    torch.ones(1, device=logits.device) * self.reward_weight,
+                    torch.ones(1, device=logits.device) * self.value_weight,
                 ])
                 ## [ t + 1]
                 weights = weights.repeat(n_states)
