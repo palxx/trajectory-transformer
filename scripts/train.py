@@ -19,6 +19,12 @@ class Parser(utils.Parser):
     ## path to a .npz saved by scripts/generate.py; when set, those self-generated
     ## rollout transitions are mixed into the offline dataset before training
     generated_data_path: Optional[str] = None
+    ## path to a state_N.pt checkpoint (same architecture as this run's config) to
+    ## warm-start model weights from before training. Only the weights are restored -
+    ## checkpoints don't save optimizer state, so the optimizer and LR schedule still
+    ## start fresh; this is a fine-tune from a pretrained checkpoint, not a byte-exact
+    ## resume of an interrupted run.
+    resume_from: Optional[str] = None
 
 #######################
 ######## setup ########
@@ -83,6 +89,11 @@ model_config = utils.Config(
 )
 
 model = model_config()
+
+if args.resume_from is not None:
+    print(f'[ train ] Resuming weights from {args.resume_from}')
+    state = torch.load(args.resume_from, weights_only=True)
+    model.load_state_dict(state, strict=True)
 
 ## NCCL (needed for torch.distributed / FSDP) isn't available for native Windows
 ## processes, so with >1 GPU we fall back to manual pipeline-parallelism: split the
